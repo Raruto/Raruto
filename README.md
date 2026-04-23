@@ -1,14 +1,10 @@
-## Hi there 👋
-
 - Engineer and Computer Science Graduate
 - 50+ Open Source projects
 - Mapping and GIS enthusiast
 - IoT explorer & UX/A11Y advocate
 
 <!--
-**Raruto/Raruto** is a ✨ _special_ ✨ repository because its `README.md` (this file) appears on your GitHub profile.
-
-Here are some ideas to get you started:
+## Hi there 👋
 
 - 🔭 I’m currently working on ...
 - 🌱 I’m currently learning ...
