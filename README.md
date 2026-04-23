@@ -2,7 +2,7 @@ Ciao! 👋
 
 I work at [**G3W-SUITE**](https://github.com/g3w-suite), a web-gis framework based on QGIS. Creator of several Leaflet plugins. FLOSS-ing [stuff](https://raruto.github.io/) since 2014.
 
-UX/A11Y advocate with a solid Engineer and CS background.
+Sometimes writing [technical content](https://www.linkedin.com/in/raruto).
 
 <!--
 ## Hi there 👋
