@@ -1,8 +1,8 @@
 Ciao! 👋
 
-I work on [**G3W-SUITE**](https://github.com/g3w-suite), a web-gis framework based on QGIS. Creator of several Leaflet plugins. FLOSS-ing [stuff](https://raruto.github.io/) since 2014.
+I work on [**G3W-SUITE**](https://github.com/g3w-suite), a popular web-gis framework based on QGIS. I'm the creator of several Leaflet plugins and I've been FLOSS-ing [stuff](https://raruto.github.io/) since 2014.
 
-Sometimes writing [technical content](https://www.linkedin.com/in/raruto).
+Sometimes I write [technical content](https://www.linkedin.com/in/raruto). Feel free to stay in touch! 😊
 
 <!--
 ## Hi there 👋
