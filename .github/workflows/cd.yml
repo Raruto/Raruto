@@ -10,8 +10,8 @@
 # - Configure npm trusted publishing for the calling repository and the
 #   calling workflow's filename, allowing npm publish. OIDC requires a
 #   GitHub-hosted runner and a compatible npm CLI; Node 24 provides one.
-# - Provide package.json, package-lock.json, npm test, Playwright, and
-#   build/version.js <version>. The latter updates tracked package references.
+# - Provide package.json, package-lock.json, npm test, Playwright, and at
+#   least one tracked reference of the form package-name@version.
 # - Start from a reachable v<package version> tag with a published GitHub
 #   release. Version numbers must be numeric major.minor.patch, without a
 #   prerelease or build suffix.
@@ -117,7 +117,8 @@ jobs:
       #
       # The embedded assertions check these rules before applying them.
       # --ignore-scripts bypasses the caller's local preversion guard; the
-      # version script then updates tracked references before the full test.
+      # embedded updater then changes tracked package references. It checks
+      # its behavior in a temporary Git repository before updating the caller.
       - name: Prepare release
         if: steps.state.outputs.needed == 'true'
         id: prepare
@@ -172,7 +173,50 @@ jobs:
           NODE
           )
           npm version "$version" --no-git-tag-version --ignore-scripts
-          node build/version.js "$version"
+          node --input-type=module - "$version" <<'NODE'
+          import assert from 'node:assert/strict';
+          import { execFileSync, spawnSync } from 'node:child_process';
+          import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+          import { tmpdir } from 'node:os';
+          import { join, resolve } from 'node:path';
+
+          async function updateVersionReferences(root, newVersion) {
+            if (!newVersion) throw new Error('Pass the new version as an argument');
+            const { name } = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
+            const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const pattern = `${escapedName}@[0-9][0-9A-Za-z.+-]*`;
+            const packageReference = new RegExp(pattern, 'g');
+            const search = spawnSync('git', ['grep', '-IlzE', pattern], { cwd: root, encoding: 'utf8' });
+            if (search.error) throw search.error;
+            if (search.status === 1) throw new Error(`No versioned ${name} references found`);
+            if (search.status !== 0) throw new Error(`git grep failed: ${search.stderr.trim()}`);
+            for (const path of search.stdout.split('\0').filter(Boolean)) {
+              const filePath = resolve(root, path);
+              const contents = await readFile(filePath, 'utf8');
+              const updated = contents.replace(packageReference, `${name}@${newVersion}`);
+              if (updated !== contents) await writeFile(filePath, updated);
+            }
+          }
+
+          const fixture = await mkdtemp(join(tmpdir(), 'release-references-'));
+          try {
+            const git = (...args) => execFileSync('git', args, { cwd: fixture, encoding: 'utf8' });
+            await writeFile(join(fixture, 'package.json'), JSON.stringify({ name: 'release.fixture' }));
+            await writeFile(join(fixture, 'README.md'), 'release.fixture@0.1.0 releaseXfixture@0.1.0\n');
+            await writeFile(join(fixture, 'untracked.txt'), 'release.fixture@0.1.0\n');
+            git('init', '-q');
+            git('add', '--', 'package.json', 'README.md');
+            await updateVersionReferences(fixture, '0.2.0');
+            assert.equal(await readFile(join(fixture, 'README.md'), 'utf8'), 'release.fixture@0.2.0 releaseXfixture@0.1.0\n');
+            assert.equal(await readFile(join(fixture, 'untracked.txt'), 'utf8'), 'release.fixture@0.1.0\n');
+            assert.equal(git('show', ':README.md'), 'release.fixture@0.1.0 releaseXfixture@0.1.0\n');
+            await writeFile(join(fixture, 'README.md'), 'releaseXfixture@0.1.0\n');
+            await assert.rejects(updateVersionReferences(fixture, '0.2.0'), /No versioned release\.fixture references found/);
+          } finally {
+            await rm(fixture, { recursive: true, force: true });
+          }
+          await updateVersionReferences(process.cwd(), process.argv[2]);
+          NODE
           echo "version=$version" >> "$GITHUB_OUTPUT"
       # npm test is responsible for building and testing the exact release
       # files. A failure stops the job before the commit, tag, or publication.
