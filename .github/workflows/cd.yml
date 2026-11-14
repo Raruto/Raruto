@@ -12,6 +12,8 @@
 #   GitHub-hosted runner and a compatible npm CLI; Node 24 provides one.
 # - Provide package.json, package-lock.json, npm test, Playwright, and at
 #   least one tracked reference of the form package-name@version.
+# - Match the caller's CI with node-version, runner, legacy-peer-deps and
+#   webkit when its test environment differs from the defaults.
 # - Start from a reachable v<package version> tag with a published GitHub
 #   release. Version numbers must be numeric major.minor.patch, without a
 #   prerelease or build suffix.
@@ -37,10 +39,22 @@ on:
       head-sha:
         required: true
         type: string
+      legacy-peer-deps:
+        type: boolean
+        default: false
+      webkit:
+        type: boolean
+        default: false
+      node-version:
+        type: string
+        default: '24'
+      runner:
+        type: string
+        default: ubuntu-latest
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     # The caller must grant at least these permissions; reusable workflows
     # cannot elevate permissions inherited from the calling job.
     permissions:
@@ -60,7 +74,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: ${{ inputs.node-version }}
           registry-url: https://registry.npmjs.org
       # Fail if the tested commit is no longer on the branch, the nearest
       # reachable version tag disagrees with package.json, or its GitHub
@@ -106,9 +120,21 @@ jobs:
       # browser scenarios require the Chromium binaries and system packages.
       - name: Install dependencies
         if: steps.state.outputs.needed == 'true'
+        env:
+          LEGACY_PEER_DEPS: ${{ inputs.legacy-peer-deps }}
+          WEBKIT: ${{ inputs.webkit }}
         run: |
-          npm ci
-          npx playwright install --with-deps chromium
+          set -euo pipefail
+          if [ "$LEGACY_PEER_DEPS" = true ]; then
+            npm ci --legacy-peer-deps
+          else
+            npm ci
+          fi
+          if [ "$WEBKIT" = true ]; then
+            npx playwright install --with-deps chromium webkit
+          else
+            npx playwright install --with-deps chromium
+          fi
       # Examine all commit messages after the previous tag, case-insensitively:
       # [major] wins over [minor]; otherwise increment patch. Patch and minor
       # carry after 9, e.g. 0.0.9 -> 0.1.0 and 0.9.9 -> 1.0.0. Explicit
@@ -223,6 +249,13 @@ jobs:
       - name: Test release
         if: steps.state.outputs.needed == 'true'
         run: npm test
+      # Trusted publishing requires a compatible npm CLI, even when the
+      # caller tests with an older Node version.
+      - uses: actions/setup-node@v4
+        if: steps.state.outputs.needed == 'true' && inputs.node-version != '24'
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
       # Stage only tracked changes, including generated bundles; new untracked
       # files are not included. Push branch and tag atomically, so a concurrent
       # branch update rejects both rather than overwriting work. The bot's
