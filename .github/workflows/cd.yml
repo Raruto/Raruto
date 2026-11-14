@@ -281,7 +281,7 @@ jobs:
       - name: Publish to npm
         if: steps.state.outputs.needed == 'true'
         run: npm publish --access public --ignore-scripts
-      # Prepend commit subjects since the previous tag, oldest first,
+      # Prepend non-merge commit subjects since the previous tag, oldest first,
       # excluding the release commit itself, to GitHub's generated notes.
       # Use the same previous tag for the generated Full Changelog range.
       # The release title is the bare version; its tag and URL retain the v.
@@ -300,7 +300,7 @@ jobs:
           PREVIOUS_TAG: ${{ steps.state.outputs.tag }}
         run: |
           set -euo pipefail
-          notes=$(git log --reverse --format='- %s' "$PREVIOUS_TAG..v$VERSION^")
+          notes=$(git log --no-merges --reverse --format='- %s' "$PREVIOUS_TAG..v$VERSION^")
           if [ -z "$notes" ]; then
             echo "::error::No commits found since $PREVIOUS_TAG."
             exit 1
