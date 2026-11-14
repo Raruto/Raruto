@@ -247,9 +247,13 @@ jobs:
       - name: Publish to npm
         if: steps.state.outputs.needed == 'true'
         run: npm publish --access public --ignore-scripts
+      # Prepend every commit subject since the previous tag, oldest first,
+      # including the release commit, to GitHub's generated release notes.
+      # Use the same previous tag for the generated Full Changelog range.
+      #
       # If this fails after npm succeeds, do not republish the immutable npm
-      # version. Verify the registry version, then create the release with
-      # gh release create vX.Y.Z --verify-tag --generate-notes.
+      # version. Verify the registry version, then recreate the release from
+      # the existing tag using the same previous tag and commit list.
       # Later runs intentionally stop at "Check release state" until the
       # previous tagged version has a published GitHub release.
       - name: Create GitHub release
@@ -258,4 +262,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ steps.prepare.outputs.version }}
-        run: gh release create "v$VERSION" --verify-tag --generate-notes
+          PREVIOUS_TAG: ${{ steps.state.outputs.tag }}
+        run: |
+          set -euo pipefail
+          notes=$(git log --reverse --format='- %s' "$PREVIOUS_TAG..v$VERSION")
+          if [ -z "$notes" ]; then
+            echo "::error::No commits found since $PREVIOUS_TAG."
+            exit 1
+          fi
+          printf '%s\n' "$notes" | gh release create "v$VERSION" --verify-tag --generate-notes --notes-start-tag "$PREVIOUS_TAG" --notes-file -
