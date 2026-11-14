@@ -260,6 +260,7 @@ jobs:
       # files are not included. Push branch and tag atomically, so a concurrent
       # branch update rejects both rather than overwriting work. The bot's
       # GITHUB_TOKEN push does not trigger a new push workflow.
+      # Use the bare version as the commit subject; Git tags retain their v.
       - name: Commit and tag tested release
         if: steps.state.outputs.needed == 'true'
         env:
@@ -270,7 +271,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -u
-          git commit -m "chore: release v$VERSION"
+          git commit -m "$VERSION"
           git tag "v$VERSION"
           git push --atomic origin "HEAD:refs/heads/$BRANCH" "refs/tags/v$VERSION"
       # OIDC authenticates npm without a long-lived publish token. If this
@@ -280,9 +281,10 @@ jobs:
       - name: Publish to npm
         if: steps.state.outputs.needed == 'true'
         run: npm publish --access public --ignore-scripts
-      # Prepend every commit subject since the previous tag, oldest first,
-      # including the release commit, to GitHub's generated release notes.
+      # Prepend commit subjects since the previous tag, oldest first,
+      # excluding the release commit itself, to GitHub's generated notes.
       # Use the same previous tag for the generated Full Changelog range.
+      # The release title is the bare version; its tag and URL retain the v.
       #
       # If this fails after npm succeeds, do not republish the immutable npm
       # version. Verify the registry version, then recreate the release from
@@ -298,9 +300,9 @@ jobs:
           PREVIOUS_TAG: ${{ steps.state.outputs.tag }}
         run: |
           set -euo pipefail
-          notes=$(git log --reverse --format='- %s' "$PREVIOUS_TAG..v$VERSION")
+          notes=$(git log --reverse --format='- %s' "$PREVIOUS_TAG..v$VERSION^")
           if [ -z "$notes" ]; then
             echo "::error::No commits found since $PREVIOUS_TAG."
             exit 1
           fi
-          printf '%s\n' "$notes" | gh release create "v$VERSION" --verify-tag --generate-notes --notes-start-tag "$PREVIOUS_TAG" --notes-file -
+          printf '%s\n' "$notes" | gh release create "v$VERSION" --title "$VERSION" --verify-tag --generate-notes --notes-start-tag "$PREVIOUS_TAG" --notes-file -
