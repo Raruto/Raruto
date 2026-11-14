@@ -1,0 +1,217 @@
+# Reusable npm release workflow. The calling repository owns the release:
+# its code is checked out, its GITHUB_TOKEN pushes the commit and tag, and
+# its npm package and GitHub releases are published.
+#
+# Caller contract:
+# - Call only after the desired CI checks pass. This workflow does not query
+#   their status; branch and head-sha identify the commit the caller tested.
+# - Grant contents: write and id-token: write to the calling job. The token
+#   and any branch protection rules must permit a commit and tag push.
+# - Configure npm trusted publishing for the calling repository and the
+#   calling workflow's filename, allowing npm publish. OIDC requires a
+#   GitHub-hosted runner and a compatible npm CLI; Node 24 provides one.
+# - Provide package.json, package-lock.json, npm test, Playwright, and
+#   build/version.js <version>. The latter updates tracked package references.
+# - Start from a reachable v<package version> tag with a published GitHub
+#   release. Version numbers must be numeric major.minor.patch, without a
+#   prerelease or build suffix.
+#
+# Flow: check branch and prior release -> calculate version -> update files ->
+#       test -> atomically push commit and tag -> npm publish -> GitHub release.
+# npm and GitHub publication are separate operations, not a transaction.
+#
+# Trusted publishing: https://docs.npmjs.com/trusted-publishers/
+# Reusable workflows: https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows
+# Example caller, versioning, setup and recovery:
+# https://github.com/Raruto/leaflet-city-mapper/blob/master/build/README.md#data-and-releases
+name: Reusable CD
+
+# This workflow is not an event trigger. The caller decides which event and
+# CI result may invoke it; head-sha must be that CI run's tested commit.
+on:
+  workflow_call:
+    inputs:
+      branch:
+        required: true
+        type: string
+      head-sha:
+        required: true
+        type: string
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # The caller must grant at least these permissions; reusable workflows
+    # cannot elevate permissions inherited from the calling job.
+    permissions:
+      contents: write
+      id-token: write
+    # Serialize releases per caller and branch. GitHub allows up to 100
+    # pending jobs with queue: max; additional jobs are canceled.
+    concurrency:
+      group: release-${{ github.repository }}-${{ inputs.branch }}
+      queue: max
+    steps:
+      # Full history and tags are required to compare commits and inspect
+      # messages since the previous release. Checkout uses the caller's repo.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      # Fail if the tested commit is no longer on the branch, the nearest
+      # reachable version tag disagrees with package.json, or its GitHub
+      # release is absent or still a draft. Do not mask incomplete releases.
+      #
+      # If the tested commit is already in that tag, it was released. If the
+      # branch has a newer tip, skip it and let the newer push's CI/CD handle
+      # the combined changes. Otherwise pass the tag and version onward.
+      - name: Check release state
+        id: state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PUSH_SHA: ${{ inputs.head-sha }}
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor "$PUSH_SHA" HEAD || {
+            echo "::error::The tested commit is no longer on the release branch."
+            exit 1
+          }
+          tag=$(git describe --tags --match 'v[0-9]*' --abbrev=0 HEAD)
+          version=$(node -p "require('./package.json').version")
+          if [ "$tag" != "v$version" ]; then
+            echo "::error::Package version $version does not match latest tag $tag."
+            exit 1
+          fi
+          draft=$(gh release view "$tag" --json isDraft --jq '.isDraft')
+          if [ "$draft" != false ]; then
+            echo "::error::Release $tag is not published."
+            exit 1
+          fi
+          if git merge-base --is-ancestor "$PUSH_SHA" "$tag"; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          elif [ "$(git rev-parse HEAD)" != "$PUSH_SHA" ]; then
+            echo "A newer push will release the pending commits."
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+            echo "tag=$tag" >> "$GITHUB_OUTPUT"
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+          fi
+      # The release is tested independently after preparing its version;
+      # browser scenarios require the Chromium binaries and system packages.
+      - name: Install dependencies
+        if: steps.state.outputs.needed == 'true'
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      # Examine all commit messages after the previous tag, case-insensitively:
+      # [major] wins over [minor]; otherwise increment patch. Patch and minor
+      # carry after 9, e.g. 0.0.9 -> 0.1.0 and 0.9.9 -> 1.0.0. Explicit
+      # [minor] also carries; this is intentionally not normal SemVer
+      # incrementing, and can reach 1.0.0 without an explicit decision.
+      #
+      # The embedded assertions check these rules before applying them.
+      # --ignore-scripts bypasses the caller's local preversion guard; the
+      # version script then updates tracked references before the full test.
+      - name: Prepare release
+        if: steps.state.outputs.needed == 'true'
+        id: prepare
+        env:
+          PREVIOUS_TAG: ${{ steps.state.outputs.tag }}
+          PREVIOUS_VERSION: ${{ steps.state.outputs.version }}
+        run: |
+          set -euo pipefail
+          version=$(node --input-type=module - "$PREVIOUS_VERSION" "$PREVIOUS_TAG" <<'NODE'
+          import assert from 'node:assert/strict';
+          import { execFileSync } from 'node:child_process';
+
+          function nextReleaseVersion(version, messages) {
+            const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(version);
+            if (!match) throw new Error(`Invalid release version: ${version}`);
+            let [major, minor, patch] = match.slice(1).map(Number);
+            if (![major, minor, patch].every(Number.isSafeInteger)) {
+              throw new Error(`Release version is too large: ${version}`);
+            }
+            if (/\[major\]/i.test(messages)) {
+              major++;
+              minor = 0;
+              patch = 0;
+            } else if (/\[minor\]/i.test(messages) || patch >= 9) {
+              minor++;
+              patch = 0;
+              if (minor >= 10) {
+                major++;
+                minor = 0;
+              }
+            } else {
+              patch++;
+            }
+            if (!Number.isSafeInteger(major)) throw new Error('Release major version is too large');
+            return `${major}.${minor}.${patch}`;
+          }
+
+          for (const [version, messages, expected] of [
+            ['0.1.0', 'Fix rendering', '0.1.1'],
+            ['0.0.9', '', '0.1.0'],
+            ['0.1.9', '', '0.2.0'],
+            ['0.9.9', '', '1.0.0'],
+            ['1.9.9', '', '2.0.0'],
+            ['0.1.3', '[minor] Add a layer', '0.2.0'],
+            ['0.9.3', '[minor] Add a layer', '1.0.0'],
+            ['0.1.3', '[minor] Add a layer\n[major] Change the API', '1.0.0'],
+          ]) assert.equal(nextReleaseVersion(version, messages), expected);
+          assert.throws(() => nextReleaseVersion('0.1.0-beta.1', ''), /Invalid release version/);
+
+          const messages = execFileSync('git', ['log', '--format=%B', `${process.argv[3]}..HEAD`], { encoding: 'utf8' });
+          console.log(nextReleaseVersion(process.argv[2], messages));
+          NODE
+          )
+          npm version "$version" --no-git-tag-version --ignore-scripts
+          node build/version.js "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      # npm test is responsible for building and testing the exact release
+      # files. A failure stops the job before the commit, tag, or publication.
+      - name: Test release
+        if: steps.state.outputs.needed == 'true'
+        run: npm test
+      # Stage only tracked changes, including generated bundles; new untracked
+      # files are not included. Push branch and tag atomically, so a concurrent
+      # branch update rejects both rather than overwriting work. The bot's
+      # GITHUB_TOKEN push does not trigger a new push workflow.
+      - name: Commit and tag tested release
+        if: steps.state.outputs.needed == 'true'
+        env:
+          VERSION: ${{ steps.prepare.outputs.version }}
+          BRANCH: ${{ inputs.branch }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -u
+          git commit -m "chore: release v$VERSION"
+          git tag "v$VERSION"
+          git push --atomic origin "HEAD:refs/heads/$BRANCH" "refs/tags/v$VERSION"
+      # OIDC authenticates npm without a long-lived publish token. If this
+      # fails, the commit and tag already exist: resolve npm authentication
+      # or registry errors. From a clean checkout of that tag, publish only
+      # if its version is absent from npm, then create the GitHub release.
+      - name: Publish to npm
+        if: steps.state.outputs.needed == 'true'
+        run: npm publish --access public --ignore-scripts
+      # If this fails after npm succeeds, do not republish the immutable npm
+      # version. Verify the registry version, then create the release with
+      # gh release create vX.Y.Z --verify-tag --generate-notes.
+      # Later runs intentionally stop at "Check release state" until the
+      # previous tagged version has a published GitHub release.
+      - name: Create GitHub release
+        if: steps.state.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ steps.prepare.outputs.version }}
+        run: gh release create "v$VERSION" --verify-tag --generate-notes
